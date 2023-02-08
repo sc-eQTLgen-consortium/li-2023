@@ -1,0 +1,46 @@
+name: r_env
+channels:
+  - anaconda
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bioconductor-annotationhub
+  - bioconductor-clusterprofiler
+  - bioconductor-edger
+  - bioconductor-enrichplot
+  - bioconductor-go.db
+  - bioconductor-homo.sapiens
+  - bioconductor-rcy3
+  - bioconductor-rgraphviz
+  - bioconductor-rtracklayer 
+  - bioconductor-singlecellexperiment
+  - bioconductor-sva
+  - r-base=4.0.2
+  - r-corrplot
+  - r-data.table
+  - r-dplyr
+  - r-dt
+  - r-ggally
+  - r-ggplot2
+  - r-ggpubr
+  - r-gtools
+  - r-hmisc
+  - r-httr
+  - r-igraph
+  - r-kableextra
+  - r-knitr
+  - r-magrittr
+  - r-matrix
+  - r-optparse
+  - r-propr
+  - r-rcolorbrewer
+  - r-reshape2
+  - r-reticulate
+  - r-rvest
+  - r-scales
+  - r-seurat
+  - r-stringr
+  - r-tidyverse
+  - r-upsetr
+  - r-viridis

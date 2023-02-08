@@ -1,0 +1,591 @@
+---
+title: "GWAS signals in co-eQTL genes"
+author: "Matthias Heinig"
+date: "30.03.2022"
+output: html_document
+knit: (
+  function(inputFile, encoding) { 
+    outname <- gsub(".Rmd$", paste0("_", format(Sys.time(), "%Y%m%d"), ".html"), basename(inputFile));
+    print(outname);
+    rmarkdown::render( 
+      input       = inputFile, 
+      encoding    = encoding, 
+      output_file = file.path("../results/", outname)) }
+      )
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+
+################################################################################
+# Script to perform GWAS enrichment analysis for coeGenes that share the same
+# eQTL (for all eQTLs with at least 5 coeGenes)
+# Additionally to the R packages, the tool MAGMA needs to be downloaded
+# (https://ctg.cncr.nl/software/magma)
+#
+# Input: co-eQTL results (combined in one file with cell type column),
+#        file with all tested genes in co-eQTL analysis as background,
+#        GWAS summary statistics processed by the GTEx consortium
+#        (https://zenodo.org/record/3518299)
+# Output: file with MAGMA enrichment results
+###############################################################################
+
+.libPaths(c("~/packages/R/x86_64-redhat-linux-gnu-library/3.6/", .libPaths()))
+knitr::opts_chunk$set(echo = TRUE, fig.width=8, fig.height=7)
+knitr::opts_knit$set(root.dir=normalizePath(".."))
+knitr::opts_knit$set(tidy=TRUE)
+
+## knitr::opts_chunk$set(dev='pdf')
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(tidyverse)
+library(DT) # interactive html tables
+library(knitr)
+library(kableExtra)
+library(Rgraphviz) # plot networks
+library(Homo.sapiens) # annotation data
+library(scales)
+library(RColorBrewer)
+
+theme_set(theme_bw())
+```
+
+
+
+## Implementation of the MAGMA gene set approach
+
+```{r, echo=FALSE}
+## define a wrapper function to call magma
+magma.run <- function(...) { #function
+    args <- list(...)
+    cmd <- "./packages/magma/magma"
+    for (arg in names(args)) {
+      val <- args[[arg]]
+      if (!is.null(val)) {
+        cmd = paste0(cmd, " --", arg, " ", val)
+      }
+    }
+    cat(cmd, "\n")
+    system(cmd, ignore.stdout = TRUE)
+}
+
+## define a wrapper for preprocessing
+preprocess.for.magma <- function(input.file, prefix, gene.loc.file, p.column, snp.column, chr.column, pos.column, sample.size) {
+  ## files are very big, so we will do the parsing and reformating with awk and sed
+  outdir <- dirname(prefix)
+  dir.create(outdir, recursive=TRUE, showWarnings = FALSE)
+  
+  cat.cmd <- "cat"
+  sed.cmd <- "sed" ## gsed needed on mac os
+  if (length(grep(".gz$", input.file)) > 0) {
+    cat.cmd <- "zcat" ## gzcat needed on mac os will fix later
+  }
+  
+  system("pwd")
+  cat(input.file, "\n")
+  
+  ## Rename the header column to P and SNP (from p and snptestid)
+  cmd <- paste0(cat.cmd, " ", input.file, " | head -n 1 ")
+  if (snp.column != "SNP") { 
+    cmd <- paste0(cmd, " | ", 
+                  sed.cmd, " 's/\\bSNP\\b/__old__SNP/g' | ", ## rename old SNP column (if exists)
+                  sed.cmd, " 's/\\b", snp.column, "\\b/SNP/g' ") ## rename new SNP column 
+  }
+  if (p.column != "P") {
+    cmd <- paste0(cmd, " |",
+                  sed.cmd, " 's/\\bP\\s+/__old__P/g' | ", ## rename old Pvalue column (if exists)
+                  sed.cmd, " 's/\\b", p.column, "\\b/P/g'") ## rename P val col
+  }
+  # cmd <- paste0(cmd, " > ", prefix, "_P.txt")
+  # cat(cmd, "\n")
+  # system(cmd)
+  # cmd <- paste0(cat.cmd, " ", input.file, "| tail -n +2 >> ", prefix, "_P.txt")
+  # cat(cmd, "\n")
+  # system(cmd)
+  
+  ## Annotate the SNPs of our GWAS to genes. SNP locations are formated:
+  ## rsid, chrom, bp
+  ## find the indices of the rsid, chrom and bp
+  cn <- colnames(read.csv(input.file, sep="\t", nrow=2))
+  col.idx <- match(c(snp.column, chr.column, pos.column), cn)
+  if (any(is.na(col.idx))) {
+    cat("colname(s)", c(snp.column, chr.column, pos.column)[is.na(col.idx)], "not found in", cn, "\n")
+    stop()
+  }
+  col.idx <- paste0("$", col.idx)
+  cmd <- paste0(cat.cmd, " ", input.file, " | tail -n +2 ", " | awk 'BEGIN{OFS=\"\t\"}{gsub(/chr/, \"\", ", col.idx[2], "); print ", 
+                paste(col.idx, collapse=", "), "}' | sed 's/$chr//g' > ", prefix, "_snppos.txt")
+  cat(cmd, "\n")
+  system(cmd)
+  
+  ## annotate SNPs to genes
+  magma.run(annotate="", `snp-loc`=paste0(prefix, "_snppos.txt"), `gene-loc`=gene.loc.file, out=prefix)
+  
+  ## unzip the file if needed
+  if (length(grep(".gz$", input.file)) > 0) {
+    new.input <- paste0(prefix, "_P.txt")
+    cmd <- paste(cat.cmd, input.file, ">", new.input)
+    system(cmd)
+    input.file <- new.input
+  }
+  
+  ## run the gene level analysis
+  if (is.na(as.numeric(sample.size))) {
+    sample.size <- paste0("ncol=", sample.size)
+  } else {
+    sample.size <- paste0("N=", sample.size)
+  }
+  pval.arg <- paste0(input.file, " ", sample.size, " use=", paste(snp.column, p.column, sep=","))
+  magma.run(bfile="data/current/references/magma/g1000_eur",  pval=pval.arg, `gene-annot`=paste0(prefix, ".genes.annot"), out=prefix)
+}
+```
+
+
+Gene annotations for magma are based on entrez ids. So we check if all symbols present in the PPI data can be mapped to entrez ids.
+```{r, message=FALSE}
+symbol2entrez <- select(Homo.sapiens, columns=c("SYMBOL","ENTREZID"), keys=keys(Homo.sapiens, keytype="SYMBOL"), keytype="SYMBOL")
+alias2entrez <- select(Homo.sapiens, columns=c("ALIAS","ENTREZID"), keys=keys(Homo.sapiens, keytype="ALIAS"), keytype="ALIAS")
+colnames(alias2entrez)[1] <- "SYMBOL"
+name2entrez <- unique(rbind(symbol2entrez, alias2entrez))
+
+write.table(name2entrez, file="results/current/name2entrez.txt", sep="\t", quote=F, row.names=F)
+```
+
+
+
+
+## Run the analysis systematically on many GWAS
+
+```{r, echo=FALSE}
+run.magma.on.gwas.list <- function(magma.params, set.file, out.suffix, rerun=TRUE, ...) {
+  magma.res <- NULL
+  for (i in 1:nrow(magma.params)) {
+    ## print(magma.params[i,])
+    prefix <- magma.params[i,"prefix"]
+    gsa.file <- paste0(prefix, out.suffix, ".gsa.out")
+    if (rerun || !file.exists(gsa.file)) {
+      with(magma.params[i,], {
+        print(genome.build)
+        if (genome.build == "hg19") {
+          gene.loc.file <- "data/current/references/magma/NCBI37.3.gene.loc"
+        } else if (genome.build == "hg38") {
+          gene.loc.file <- "data/current/references/magma/NCBI38.gene.loc"
+        } else {
+          cat("Only genome build hg19 and hg38 currently available!!\n")
+          next  
+        }
+        gene.level.file <- paste0(prefix, ".genes.raw")
+        if (!file.exists(gene.level.file)) {
+          preprocess.for.magma(input.file, prefix, gene.loc.file, p.column, snp.column, chrom.column, pos.column, sample.size)
+        }
+        magma.run(`gene-results`=gene.level.file, `set-annot`=set.file, out=paste0(prefix, out.suffix), ...) # model="condition-hide=Average direction=greater",
+        })
+    }
+    enrichment <- read.table(gsa.file, stringsAsFactors=F, header=TRUE, comment="#")
+    enrichment <- data.frame(enrichment, 
+                      prefix,
+                      trait=basename(prefix),
+                      FDR=p.adjust(enrichment$P, "BH"),
+                      stringsAsFactors=FALSE)
+    magma.res <- rbind(magma.res, enrichment)
+  }
+  write.table(magma.res, file=paste0("magma_enrichment", out.suffix, ".txt"), sep="\t", quote=F)
+  return(magma.res)
+}
+```
+
+Overview of GWAS input data:
+
+```{r, message=FALSE, echo=FALSE}
+gwas.info <- read_tsv("data/current/gtex_gwas_data/gwas_metadata.txt")
+
+gwas.magma.params <- dplyr::rename(gwas.info[,c("new_abbreviation", "Sample_Size", "Tag")], prefix=new_abbreviation, sample.size=Sample_Size)
+gwas.magma.params$input.file <- paste0("data/current/gtex_gwas_data/imputed_gwas_hg38_1.1/imputed_", gwas.magma.params$Tag, ".txt.gz")
+gwas.magma.params$prefix <- paste0("results/current/magma/", gwas.magma.params$prefix)
+## add genome build,  "snp.column"   "p.column"     "chrom.column" "pos.column"
+gwas.magma.params <- data.frame(gwas.magma.params, genome.build="hg38", snp.column="variant_id", p.column="pvalue", chrom.column="chromosome", pos.column="position", stringsAsFactors = FALSE)
+
+## also add the T1D GWAS
+t1d <- data.frame(prefix="results/current/magma/T1D_Onengut", sample.size=18932, Tag="T1D_Onengut", input.file="data/current/other_gwas/25751624-GCST005536-EFO_0001359.h.tsv.gz",  genome.build="hg38", snp.column="hm_rsid", p.column="p_value", chrom.column="chromosome", pos.column="base_pair_location", stringsAsFactors = FALSE)
+
+gwas.magma.params <- rbind(gwas.magma.params, t1d)
+
+datatable(gwas.magma.params)                             
+```
+
+
+
+```{r, echo=FALSE}
+grep.cmd <- "grep"
+## on my mac need to use gnu grep (faster)
+if (system("hostname", intern=TRUE) == "MB080512") {
+  grep.cmd <- "/opt/homebrew/bin/ggrep"
+}
+```
+
+
+```{r, echo=FALSE}
+
+get.gene.pvalues <- function(prefix, sets, name2entrez=NULL) {
+  af.zscores <- read.table(paste0(prefix, ".genes.out"), header=T, stringsAsFactors=FALSE)
+  af.zscores <- dplyr::rename(af.zscores, Nsamples=N)
+  expr.cl <- sapply(sets, function(set) af.zscores$GENE %in% set)
+  merged <- cbind(af.zscores, expr.cl)
+  
+  merged <- cbind(merged, leverage=NA, FDR=p.adjust(merged$P, "BH"))
+  if (!is.null(name2entrez)) {
+    merged <- merge(merged, name2entrez, by.x="GENE", by.y="ENTREZID")
+  }
+  return(merged)
+}
+
+## To get back to the SNP level we use the annotation files of magma. We select all genes in the interaction network. In a first step we reduce the size of the GWAS data.
+get.snp.pvalues <- function(prefix, selected.entrez, grep.cmd="grep", snp.col="variant_id", redo=FALSE) {
+  efile <- paste0(prefix, "_entrez_with_ppi.txt")
+  sfile <- paste0(prefix, "_snps_with_ppi.txt")
+  pfile <- paste0(prefix, "_P_with_ppi.txt")
+  if (!file.exists(pfile) || redo) {
+    cat(selected.entrez, file=efile, sep="\n")
+    cmd <- paste0(grep.cmd, " -F -w -f ", efile, " ", prefix, ".genes.annot | cut -d '\t' -f 2- | tr '\\t' '\\n' | grep -v NA | sort -u > ", sfile)
+    print(cmd)
+    system(cmd)
+    cmd <- paste0(grep.cmd, " -F -w -f ", sfile, " ", prefix, "_P.txt > ", pfile)
+    system(cmd)
+    print(cmd)
+    snp_pval <- read.table(pfile, sep="\t", stringsAsFactors = FALSE)
+    colnames(snp_pval) <- colnames(read.csv(paste0(prefix, "_P.txt"), sep="\t", nrows=3))
+    
+    if (snp.col != "variant_id") {
+      colnames(snp_pval) <- gsub(snp.col, "variant_id", colnames(snp_pval))
+    }
+    
+    #In the next step we read in the mapping of genes to SNPs
+    ann <- readLines(paste0(prefix, ".genes.annot"))
+    ann <- bind_rows(lapply(strsplit(ann, "\t"), function(x) {
+      if (length(x) > 1) {
+        snp <- x[-1]
+      } else {
+        snp <- NA
+      }
+      data.frame(gene=x[1], snp, stringsAsFactors = FALSE)
+    }))
+    ann <- ann[!is.na(ann$snp),]
+    ann <- ann[ann$snp != "NA",]
+    ann <- ann[ann$snp != ".",]
+    
+    # Annotate SNPs with genes and gene symbols
+    snp_pval <- merge(snp_pval, ann, by.x="variant_id", by.y="snp")
+    write.table(snp_pval, file=pfile, sep="\t", quote=F, row.names=F)
+  } else {
+    snp_pval <- read.csv(pfile, sep="\t", stringsAsFactors = FALSE)
+  }
+  return(snp_pval)
+}
+
+get.drivers <- function(prefix, sets, name2entrez=NULL, grep.cmd="grep", redo=FALSE, pval.col="pvalue", snp.col="variant_id") {
+  selected.entrez <- unique(unlist(sets))
+  gene_pvals <- get.gene.pvalues(prefix, sets, name2entrez)
+  snp_pval <- get.snp.pvalues(prefix, selected.entrez, grep.cmd=grep.cmd, snp.col=snp.col)
+  if (pval.col != "pvalue") {
+    colnames(snp_pval) <- gsub(pval.col, "pvalue", colnames(snp_pval))
+  }
+  browser()
+  minp <- group_by(snp_pval, gene) %>% summarise(variant_id=variant_id[which.min(pvalue)], minp=min(pvalue))
+  pvals <- merge(gene_pvals, minp, by.x="GENE", by.y="gene")
+  return(pvals)
+}
+```
+
+```{r, echo=FALSE}
+get_gwas_region <- function(prefix, chrom, start, end, awk.cmd="awk", cat.cmd="cat", redo=FALSE, chr.column="chromosome", pos.column="position") {
+  out.file <- paste0(prefix, "_P_", chrom, "_", start, "_", end, ".txt")
+  if (!file.exists(out.file) || redo) {
+    input.file <- paste0(prefix, "_P.txt")
+    ## find the indices of the chrom and bp
+    cn <- colnames(read.csv(input.file, sep="\t", nrow=2))
+    col.idx <- match(c(chr.column, pos.column), cn)
+    if (any(is.na(col.idx))) {
+      cat("colname(s)", c(chr.column, pos.column)[is.na(col.idx)], "not found in", cn, "\n")
+      stop()
+    }
+    col.idx <- paste0("$", col.idx)
+    ## build an awk script to filter the file
+    cmd <- paste0(cat.cmd, " ", input.file, " | tail -n +2 ", " | ", awk.cmd, 
+                  " 'BEGIN{OFS=\"\t\"}{gsub(/chr/, \"\", ", col.idx[1], "); ", ## replace chr prefix of chrom names
+                  "if (", col.idx[1], ' == "', chrom, '" && ', ## match chrom name
+                          col.idx[2], " > ", start, " && ", col.idx[2], " < ", end, ")", ## match position
+                  "{print $0;}}' >> ", out.file)
+    cat(cmd, "\n")
+    ## write header to out file
+    system(paste0("head -n 1 ", input.file, " > ", out.file))
+    ## then extract the region
+    system(cmd)
+  }
+  
+  gwas_pvals <- read_tsv(out.file)
+  return(gwas_pvals)
+}
+
+## convenience function that works with the gwas input parameter table
+get_gwas_region_for_study <- function(prefix, magma.params, chrom, start, end, ...) {
+  idx <- which(magma.params$prefix == prefix)
+  get_gwas_region(prefix, chrom, start, end, chr.column=magma.params[idx,"chrom.column"], pos.column=magma.params[idx,"pos.column"])
+}
+```
+
+## Run for co-eQTLs
+
+Define new sets
+
+```{r, message=FALSE, eval=FALSE}
+## these are the new communities
+coeqtl <- read_tsv("data/current/PPI/coeqtls_supptable6.tsv")
+pval_cols <- c("MetaP_CD4T", "MetaP_CD8T", "MetaP_monocyte", "MetaP_DC", "MetaP_NK", "MetaP_B")
+x <- coeqtl %>% separate(`SNP-eGene-co-eGene`, into=c("SNP", "eGene", "coeGene"), sep="_")
+
+coeqtl <- coeqtl %>% 
+  pivot_longer(names_to="celltype", cols=pval_cols, values_to="pvalue") %>%
+  filter(!is.na(pvalue)) %>%
+  mutate(celltype=gsub("MetaP_", "", celltype)) %>%
+  separate(`SNP-eGene-co-eGene`, into=c("SNP", "eGene", "coeGene"), sep="_") %>% 
+  mutate(set_id=paste(celltype, SNP, eGene, sep="_"))
+```
+
+
+```{r, message=FALSE}
+coeqtl <- read_tsv("data/current/PPI/coeqtls_merged.txt")
+coeqtl <- coeqtl %>% 
+  dplyr::rename(eGene=eqtlgene, coeGene=gene2) %>%
+  mutate(set_id=paste(celltype, SNP, eGene, sep="_"))
+coeqtl <- coeqtl %>% inner_join(name2entrez, by=c("coeGene"="SYMBOL"))
+```
+
+
+Define the gene sets
+
+```{r}
+csets <- with(coeqtl, tapply(ENTREZID, set_id, as.list))
+```
+
+
+Also add the gene set of Tcell specific negative coeqtl of RPS26
+```{r}
+RPS26_CD4T <- coeqtl %>% filter(eGene == "RPS26" & MetaPZ< 0 & celltype == "CD4T") %>% distinct()
+csets[["CD4T_rs1131017_RPS26downCD4T"]] <- as.list(unique(RPS26_CD4T$ENTREZID))
+```
+
+Remove sets that are smaller than 5 genes
+```{r}
+csets <- csets[sapply(csets, length) >= 5]
+```
+
+
+```{r}
+comm.setfile <- "results/current/coeqtl_gene_sets.txt"
+for (set in names(csets)) {
+  cat(set, "\t", paste(csets[[set]], collapse="\t"), "\n", sep="", file=comm.setfile, append=(set != names(csets)[1]))
+}
+```
+
+
+Run the GWAS enrichments on this set
+```{r}
+magma.res.coeqtl <- run.magma.on.gwas.list(gwas.magma.params, set.file=comm.setfile, "_gwas_by_coeqtl", rerun=FALSE)
+write_tsv(magma.res.coeqtl, "results/current/magma_gtex_gwas_by_coeqtl.txt")
+```
+
+```{r}
+magma.res.coeqtl %>% filter(FDR < 0.1)
+```
+
+
+```{r}
+info_cols <- c("Tag", "PUBMED_Paper_Link", "new_abbreviation", "Phenotype")
+magma.res.coeqtl %>% filter(FDR < 0.1 & VARIABLE == "CD4T_rs1131017_RPS26downCD4T") %>% inner_join(dplyr::select(gwas.info, !!info_cols), by=c("trait"="new_abbreviation"))
+```
+
+
+Also get the gwas P-values for all of the co-eQTL SNPs
+
+```{r}
+cat(unique(coeqtl$SNP), sep="\n", file="results/current/coeqtl_snp_list.txt")
+```
+
+Check which SNPs are missing from the GWAS
+```{r}
+infile <- paste0(gwas.magma.params$prefix[1], "_P.txt")
+cmd <- paste0("awk 'NR==FNR {key[$1]; next} !($1 in key)' ", infile, " results/current/coeqtl_snp_list.txt")
+missing_snps <- system(cmd, intern=TRUE)
+```
+
+Actually it is not clear if all GWAS always contain the same SNPs. So we extract LD proxxies for all co-eQTL to be on the safe side.
+
+```{r}
+proxies <- read_tsv("data/current/PPI/proxySearch.results.csv")
+cat(unique(proxies$RSID), sep="\n", file="results/current/coeqtl_snp_list_with_proxies.txt")
+```
+
+```{r}
+for (prefix in gwas.magma.params$prefix) {
+  outfile <- paste0(prefix, "_coeqtl_snps_P.txt")
+  cmd <- paste0("head -n 1 ", prefix, "_P.txt > ", outfile)
+  system(cmd)
+  cmd <- paste0("fgrep -w -f results/current/coeqtl_snp_list_with_proxies.txt ", prefix, "_P.txt >> ", outfile)
+  print(cmd)
+  system(cmd)
+}
+```
+
+```{r, message=FALSE, warning=FALSE}
+coeqtl_gwas <- bind_rows(lapply(1:nrow(gwas.magma.params), function(x) {
+  cnames <- c(variant_id="snp.column", chromosome="chrom.column", position="pos.column", pvalue="p.column")
+  cols <- gwas.magma.params[x,cnames]
+  more_cols <- c("prefix")
+  tab <- read_tsv(paste0(gwas.magma.params$prefix[x], "_coeqtl_snps_P.txt")) %>% mutate(prefix=gwas.magma.params$prefix[x])
+  tab <- tab[,c(as.character(cols), more_cols)]
+  colnames(tab) <- c(names(cnames), more_cols)
+  if (is.numeric(tab$chromosome))  {
+    tab$chromosome <- as.character(tab$chromosome)
+  }
+  return(tab)
+  }))
+```
+
+
+
+
+Check if there is enrichment and association for the same trait - for that: combine the gwas and the magma data using the best proxy (the snp itself if included)
+```{r}
+coeqtl_with_gwas_and_magma <- magma.res.coeqtl %>% 
+  separate(col=VARIABLE, into=c("celltype", "SNP", "gene"), sep="_", remove=FALSE) %>%
+  inner_join(dplyr::select(gwas.info, !!info_cols), by=c("trait"="new_abbreviation")) %>%
+  inner_join(proxies, by=c("SNP"="QRSID")) %>%
+  inner_join(coeqtl_gwas, by=c(prefix="prefix", RSID="variant_id")) %>%
+  group_by(VARIABLE, trait) %>% 
+  arrange(-R2, abs(DIST)) %>% dplyr::slice(1)
+write_tsv(coeqtl_with_gwas_and_magma, "results/current/coeqtl_with_gwas_and_magma.tsv")
+```
+
+
+
+Summarise the findings globally
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.05 & pvalue < 5e-8) %>% group_by(celltype, SNP, gene) %>% summarise(ntraits=length(unique(trait)))
+```
+
+Look at the RPS26 locus in more detail: CD4T specific coeQTL with negative effect size
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.05 & VARIABLE == "CD4T_rs1131017_RPS26downCD4T" & pvalue < 5e-8) %>% dplyr::select(VARIABLE, magma_FDR=FDR, Tag, RSID, R2, pvalue)
+```
+
+Look at the RPS26 locus in more detail: CD4T coeQTL with any effect size
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.05 & VARIABLE == "CD4T_rs1131017_RPS26" & pvalue < 5e-8) %>% dplyr::select(VARIABLE, magma_FDR=FDR, Tag, RSID, R2, pvalue)
+```
+
+
+Also run with a restricted background set of genes (all tested for coeQTLs)
+```{r}
+bg_file_symbols <- "data/current/PPI/coeqtls_tested_genes.txt"
+bg_file <- "results/current/coeqtls_tested_genes.txt"
+background <- scan(bg_file, what=character())
+background <- filter(symbol2entrez, SYMBOL %in% background)
+cat(background$ENTREZID, sep="\n", file=bg_file)
+```
+
+
+```{r}
+magma.res.coeqtl <- run.magma.on.gwas.list(gwas.magma.params, set.file=comm.setfile, "_gwas_by_coeqtl_with_bg", rerun=FALSE, settings=paste0(" gene-include=", bg_file))
+write_tsv(magma.res.coeqtl, "results/current/magma_gtex_gwas_by_coeqtl_with_bg.txt")
+```
+
+
+Check if there is enrichment and association for the same trait - for that: combine the gwas and the magma data using the best proxy (the snp itself if included)
+```{r}
+coeqtl_with_gwas_and_magma <- magma.res.coeqtl %>% 
+  separate(col=VARIABLE, into=c("celltype", "SNP", "gene"), sep="_", remove=FALSE) %>%
+  inner_join(dplyr::select(gwas.info, !!info_cols), by=c("trait"="new_abbreviation")) %>%
+  inner_join(proxies, by=c("SNP"="QRSID")) %>%
+  inner_join(coeqtl_gwas, by=c(prefix="prefix", RSID="variant_id")) %>%
+  group_by(VARIABLE, trait) %>% 
+  arrange(-R2, abs(DIST)) %>% dplyr::slice(1)
+write_tsv(coeqtl_with_gwas_and_magma, "results/current/coeqtl_with_gwas_and_magma_with_bg.tsv")
+```
+
+
+
+Summarise the findings globally
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.05 & pvalue < 5e-8) %>% group_by(celltype, SNP, gene) %>% summarise(ntraits=length(unique(trait)))
+```
+
+Look at the RPS26 locus in more detail: CD4T specific coeQTL with negative effect size
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.05 & VARIABLE == "CD4T_rs1131017_RPS26downCD4T" & pvalue < 5e-8) %>% dplyr::select(VARIABLE, magma_FDR=FDR, Tag, RSID, R2, pvalue)
+```
+
+
+
+  
+Also run the same analysis without the HLA genes
+```{r}
+csets <- with(coeqtl %>% filter(!str_detect(coeGene, "HLA") ), tapply(ENTREZID, set_id, as.list))
+```
+
+
+Also add the gene set of Tcell specific negative coeqtl of RPS26
+```{r}
+RPS26_CD4T <- coeqtl %>% filter(eGene == "RPS26" & MetaPZ< 0 & celltype == "CD4T" & !str_detect(coeGene, "HLA")) %>% distinct()
+csets[["CD4T_rs1131017_RPS26downCD4T"]] <- as.list(unique(RPS26_CD4T$ENTREZID))
+```
+
+Remove sets that are smaller than 5 genes
+```{r}
+csets <- csets[sapply(csets, length) >= 5]
+```
+
+
+```{r}
+comm.setfile <- "results/current/coeqtl_gene_sets_no_HLA.txt"
+for (set in names(csets)) {
+  cat(set, "\t", paste(csets[[set]], collapse="\t"), "\n", sep="", file=comm.setfile, append=(set != names(csets)[1]))
+}
+```
+
+
+Run the GWAS enrichments on this set
+```{r}
+magma.res.coeqtl <- run.magma.on.gwas.list(gwas.magma.params, set.file=comm.setfile, "_gwas_by_coeqtl_no_HLA", rerun=FALSE)
+write_tsv(magma.res.coeqtl, "results/current/magma_gtex_gwas_by_coeqtl_no_HLA.txt")
+```
+  
+  
+Check if there is enrichment and association for the same trait - for that: combine the gwas and the magma data using the best proxy (the snp itself if included)
+```{r}
+coeqtl_with_gwas_and_magma <- magma.res.coeqtl %>% 
+  separate(col=VARIABLE, into=c("celltype", "SNP", "gene"), sep="_", remove=FALSE) %>%
+  inner_join(dplyr::select(gwas.info, !!info_cols), by=c("trait"="new_abbreviation")) %>%
+  inner_join(proxies, by=c("SNP"="QRSID")) %>%
+  inner_join(coeqtl_gwas, by=c(prefix="prefix", RSID="variant_id")) %>%
+  group_by(VARIABLE, trait) %>% 
+  arrange(-R2, abs(DIST)) %>% dplyr::slice(1)
+write_tsv(coeqtl_with_gwas_and_magma, "results/current/coeqtl_with_gwas_and_magma_no_HLA.tsv")
+```
+
+
+
+Summarise the findings globally
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.1 & pvalue < 5e-8) %>% group_by(celltype, SNP, gene) %>% summarise(ntraits=length(unique(trait)))
+```
+
+Look at the RPS26 locus in more detail: CD4T specific coeQTL with negative effect size
+```{r}
+coeqtl_with_gwas_and_magma %>% ungroup() %>% filter(FDR < 0.1 & VARIABLE == "CD4T_rs1131017_RPS26downCD4T" & pvalue < 5e-8) %>% dplyr::select(VARIABLE, magma_FDR=FDR, Tag, RSID, R2, effect_allele, pvalue)
+```
+
+  
+
+  
+
+

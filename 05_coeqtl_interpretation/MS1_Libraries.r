@@ -1,0 +1,10 @@
+### Libraries for all the project scripts
+library(stringr, quietly = TRUE, verbose = FALSE)
+library(dplyr)
+library(data.table)
+library(tidyverse)
+library('reshape2')
+library(caret)
+library('gprofiler2')
+library('coloc')
+library('biomaRt')

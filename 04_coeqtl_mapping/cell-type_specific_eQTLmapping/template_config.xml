@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+
+<settings>
+
+  <defaults>
+
+    <qc>
+        <snpqccallratethreshold>0.95</snpqccallratethreshold>
+        <snpqchwethreshold>0.0001</snpqchwethreshold>
+        <snpqcmafthreshold>0.1</snpqcmafthreshold>
+    </qc>
+
+    <analysis>
+        <analysistype>cis</analysistype>
+        <cisanalysisprobedistance>100000</cisanalysisprobedistance>
+        <correlationtype>nonparametric</correlationtype>
+        <!-- <regressOutEQTLEffects>/groups/umcg-bios/scr01/umcg-aclaringbould/eqtlpipeline_lld/cis-eQTLs/conditional/output_round18_RegressedOut/toRegressOut.txt</regressOutEQTLEffects> -->
+        <threads>10</threads>
+        <createdotplot>false</createdotplot>
+        <createqqplot>false</createqqplot>
+    </analysis>
+
+    <multipletesting>
+        <type>fdr</type>
+        <threshold>0.05</threshold>
+        <fdrtype>probe-level</fdrtype>
+        <permutations>10</permutations>
+    </multipletesting>
+
+    <output>
+        <outputdirectory>/path/to/output_dir/</outputdirectory>
+        <outputplotthreshold>0.1</outputplotthreshold>
+        <outputplotdirectory>/path/to/plotsoutput_dir/</outputplotdirectory>
+        <maxnreqtlresults>50000000</maxnreqtlresults>
+        <generatesnpsummarystatistics>false</generatesnpsummarystatistics>
+        <generateeqtlpvaluetable>false</generateeqtlpvaluetable>
+        <binaryoutput>false</binaryoutput>
+        <textoutput>true</textoutput>
+    </output>
+
+    <confine>
+        <snp/>
+	      <snpProbe>/path/to/SNPconfinement/file.tsv</snpProbe>
+        <confineSNPsToSNPsPresentInAllDatasets>false</confineSNPsToSNPsPresentInAllDatasets>
+        <confineSNPsSelectSNPInStrongestLD>false</confineSNPsSelectSNPInStrongestLD>
+        <confineProbesThatMapToKnownChromosome>false</confineProbesThatMapToKnownChromosome>
+    </confine>
+
+  </defaults>
+
+  <datasets>
+    <dataset>
+        <name>van_der_Wijst</name>
+        <location>/path/to/van_der_Wijst/genome/trityper/</location>
+        <expressiondata>/path/to/van_der_Wijst/cell_type_specific_donor_aggregated_matrix/expression.tsv</expressiondata>
+        <probeannotation>/path_to_snp_annotation_file/singleCell-annotation-stripped.tsv</probeannotation>
+        <quantilenormalize>false</quantilenormalize>
+        <logtranform>false</logtranform>
+    </dataset>
+    <dataset>
+        <name>van_Blockland_v2</name>
+        <location>/path/to/van_Blockland_v2/genome/trityper/</location>
+        <expressiondata>/path/to/van_Blockland_v2/cell_type_specific_donor_aggregated_matrix/expression.tsv</expressiondata>
+        <probeannotation>/path_to_snp_annotation_file/singleCell-annotation-stripped.tsv</probeannotation>
+        <quantilenormalize>false</quantilenormalize>
+        <logtranform>false</logtranform>
+    </dataset>
+    <dataset>
+        <name>van_Blockland_v3</name>
+        <location>/path/to/van_Blockland_v3/genome/trityper/</location>
+        <expressiondata>/path/to/van_Blockland_v3/cell_type_specific_donor_aggregated_matrix/expression.tsv</expressiondata>
+        <probeannotation>/path_to_snp_annotation_file/singleCell-annotation-stripped.tsv</probeannotation>
+        <quantilenormalize>false</quantilenormalize>
+        <logtranform>false</logtranform>
+    </dataset>
+    <dataset>
+        <name>Oelen_v2</name>
+        <location>/path/to/Oelen_v2/genome/trityper/</location>
+        <expressiondata>/path/to/Oelen_v2/cell_type_specific_donor_aggregated_matrix/expression.tsv</expressiondata>
+        <probeannotation>/path_to_snp_annotation_file/singleCell-annotation-stripped.tsv</probeannotation>
+        <quantilenormalize>false</quantilenormalize>
+        <logtranform>false</logtranform>
+    </dataset>
+    <dataset>
+        <name>Oelen_v3</name>
+        <location>/path/to/Oelen_v3/genome/trityper/</location>
+        <expressiondata>/path/to/Oelen_v3/cell_type_specific_donor_aggregated_matrix/expression.tsv</expressiondata>
+        <probeannotation>/path_to_snp_annotation_file/singleCell-annotation-stripped.tsv</probeannotation>
+        <quantilenormalize>false</quantilenormalize>
+        <logtranform>false</logtranform>
+    </dataset>
+  </datasets>
+
+</settings>
