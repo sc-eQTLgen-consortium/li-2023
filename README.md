@@ -10,6 +10,8 @@ Shuang Li *, Katharina T. Schmid *, Dylan de Vries *\*, Maryna Korshevniuk *\*, 
 ** These authors contributed equally<br>
 † These authors contributed equally
 
+Publication (Genome Biology, 2023): https://doi.org/10.1186/s13059-023-02897-x
+
 Preprint: https://www.biorxiv.org/content/10.1101/2022.04.20.488925v1
 
 ## Overview
